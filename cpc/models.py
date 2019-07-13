@@ -36,16 +36,13 @@ class Encoder(nn.Module):
         self.backbone = remove_batchnorm2d(self.backbone)
 
         self.kernel_size = kernel_size
-        self.stride = kernel_size if stride is None else stride
-
-    def get_crops(self, x):
-        x = x.unfold(1, self.kernel_size, self.stride)
-        x = x.unfold(2, self.kernel_size, self.stride)
-        return x.contiguous()
+        self.stride = kernel_size // 2 if stride is None else stride
 
     def forward(self, x, average=False):
         x = x.permute((0, 2, 3, 1))
-        crops = Encoder.get_crops(x)
+        x = x.unfold(1, self.kernel_size, self.stride).unfold(2, self.kernel_size, self.stride)
+        crops = x.contiguous()
+
         b, r, c, f, h, w = crops.shape
         crops = crops.view(-1, f, h, w)
         embeddings = self.backbone(crops)

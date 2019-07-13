@@ -65,7 +65,7 @@ class Trainer:
             predictions = self.predictor(contexts)
 
             batch_loss = 0
-            for n, pred_item in enumerate(predictions):
+            for n, pred_item in enumerate(predictions, 1):
                 batch_loss += self.criterion(pred_item[:, :, :-n, :], embeddings[:, :, n:, :])
 
             self.optimizer.zero_grad()
