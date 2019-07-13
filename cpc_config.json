@@ -1,0 +1,22 @@
+{
+    "model": {
+        "encoder": {"embedding_size": 128,
+                    "kernel_size": 32,
+                    "backbone_type": "resnet34"},
+        "autoregressor": {"channel": 128,
+                          "kernel_size": 5,
+                          "n_block": 3,
+                          "n_res_block": 2,
+                          "res_channel": 128,
+                          "attention": false,
+                          "n_head": 8,
+                          "dropout": 0},
+        "predictor": {"n_predictions": 2}},
+    "trainer": {"batch_size": 32,
+                "n_epochs": 100,
+                "optimizer_params": {"lr": 1e-3,
+                                     "weight_decay": 0,
+                                     "amsgrad": true},
+                "device": null,
+                "n_jobs": 2}
+}
