@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 
-from pretrainedmodels import resnet34, se_resnext50_32x4d
+from torchvision.models import resnet34
+from pretrainedmodels import se_resnext50_32x4d
 
 
 def remove_batchnorm2d(module):
@@ -24,7 +25,7 @@ class Encoder(nn.Module):
 
         # TODO: pretrained | with batchnorm
         if backbone_type == 'resnet34':
-            self.backbone = resnet34(pretrained=None)
+            self.backbone = resnet34(pretrained=False)
         elif backbone_type == 'seresnext50':
             self.backbone = se_resnext50_32x4d(pretrained=None)
 
@@ -32,7 +33,17 @@ class Encoder(nn.Module):
             self.backbone.avgpool = nn.AdaptiveAvgPool2d(1)
         elif hasattr(self.backbone, "avg_pool"):
             self.backbone.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.backbone.last_linear = nn.Linear(self.backbone.last_linear.in_features, embedding_size)
+
+        if hasattr(self.backbone, "maxpool"):
+            self.backbone.maxpool = nn.Identity()
+        elif hasattr(self.backbone, "layer0"):
+            self.backbone.layer0[-1] = nn.Identity()
+
+        if hasattr(self.backbone, "fc"):
+            self.backbone.fc = nn.Linear(self.backbone.fc.in_features, embedding_size)
+        elif hasattr(self.backbone, "last_linear"):
+            self.backbone.last_linear = nn.Linear(self.backbone.last_linear.in_features, embedding_size)
+
         self.backbone = remove_batchnorm2d(self.backbone)
 
         self.kernel_size = kernel_size
@@ -56,14 +67,30 @@ class Encoder(nn.Module):
         return embeddings
 
 
-class Predictor(nn.Module):
+class LinearPredictor(nn.Module):
     def __init__(self, in_channels, out_channels, n_predictions=1):
         super().__init__()
-
-        self.convs = nn.ModuleList()
-        for _ in range(n_predictions):
-            conv = nn.Conv2d(in_channels, out_channels, 1, bias=False)
-            self.convs.append(conv)
+        self.convs = nn.ModuleList([nn.Conv2d(in_channels, out_channels, 1, bias=False) for _ in range(n_predictions)])
 
     def forward(self, contexts):
-        return [conv(contexts) for conv in self.convs]
+        predictions = [conv(contexts) for conv in self.convs]
+        return predictions
+
+class ReccurentPredictor(nn.Module):
+    def __init__(self, in_channels, out_channels, n_predictions=1):
+        super().__init__()
+        self.n_predictions = n_predictions
+        self.rnn = nn.GRU(in_channels, out_channels, num_layers=1, batch_first=True)
+
+    def forward(self, contexts):
+        b, _, h, w = contexts.shape
+        contexts = contexts.permute((0, 2, 3, 1)).contiguous().view(b * h * w, 1, -1)
+        hiden_state = torch.zeros(1, b * h * w, self.rnn.hidden_size, dtype=torch.float32, device=contexts.device)
+
+        predictions = []
+        for _ in range(self.n_predictions):
+            outputs, hiden_state = self.rnn(contexts, hiden_state)
+            outputs = outputs.view(b, h, w, -1).permute((0, 3, 1, 2)).contiguous()
+            predictions.append(outputs)
+
+        return predictions
