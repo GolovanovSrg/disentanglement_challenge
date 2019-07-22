@@ -1,10 +1,12 @@
 import os
 
 import torch
-from torch.optim import Adam
+import torch.nn as nn
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from .optim import AdamW
 from .losses import CPCLoss
 
 
@@ -27,28 +29,35 @@ class AvgMeter:
 
 
 class Trainer:
-    def __init__(self, encoder, autoregressor, predictor, optimizer_params={}, device=None, n_jobs=0):
-        if device is None:
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        device = torch.device(device)
+    def __init__(self, encoder, autoregressor, predictor, optimizer_params={}, devices=[0], n_jobs=0):
+        assert torch.cuda.is_available()
+
         lr = optimizer_params.get('lr', 1e-3)
         weight_decay = optimizer_params.get('weight_decay', 0)
+        warmap = optimizer_params.get('warmap', 100)
         amsgrad = optimizer_params.get('amsgrad', False)
 
-        self.encoder = encoder.to(device)
-        self.autoregressor = autoregressor.to(device)
-        self.predictor = predictor.to(device)
-        self.criterion = CPCLoss().to(device)
+        self.device = torch.device('cuda:' + str(devices[0]))
+        self.encoder = nn.DataParallel(encoder, device_ids=devices).to(self.device)
+        self.autoregressor = nn.DataParallel(autoregressor, device_ids=devices).to(self.device)
+        self.predictor = nn.DataParallel(predictor, device_ids=devices).to(self.device)
+        self.criterion = CPCLoss().to(self.device)
 
         param_optimizer = list(self.encoder.named_parameters()) + list(self.autoregressor.named_parameters()) + list(self.predictor.named_parameters())
         no_decay = ['bias']
         optimizer_grouped_parameters = [{'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': weight_decay},
                                         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}]
 
-        self.optimizer = Adam(optimizer_grouped_parameters, lr=lr, weight_decay=weight_decay, amsgrad=amsgrad)
+        self.optimizer = AdamW(optimizer_grouped_parameters, lr=lr, weight_decay=weight_decay, amsgrad=amsgrad)
+
+        def scheduler_func(iteration):
+            if iteration <= warmap:
+                return iteration / warmap
+            return 1
+
+        self.scheduler = LambdaLR(self.optimizer, scheduler_func)
 
         self.last_epoch = 0
-        self.device = device
         self.n_jobs = n_jobs
 
     def _train_epoch(self, train_dataloader):
@@ -70,6 +79,7 @@ class Trainer:
 
             self.optimizer.zero_grad()
             batch_loss.backward()
+            self.scheduler.step()
             self.optimizer.step()
 
             loss.update(batch_loss.item())
@@ -90,7 +100,7 @@ class Trainer:
                 predictions = self.predictor(contexts)
 
                 batch_loss = 0
-                for n, pred_item in enumerate(predictions):
+                for n, pred_item in enumerate(predictions, 1):
                     batch_loss += self.criterion(pred_item[:, :, :-n, :], embeddings[:, :, n:, :])
 
                 loss.update(batch_loss.item())
@@ -98,18 +108,15 @@ class Trainer:
 
             return loss()
 
-    def _save_checkpoint(self, checkpoint_dir, checkpoint_name):
-        if checkpoint_dir is None:
-            return
-
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
-        checkpoint = {'encoder': self.encoder.state_dict(),
-                      'autoregressor': self.autoregressor.state_dict(),
-                      'predictor': self.predictor.state_dict()}
+    def _save_checkpoint(self, checkpoint_path):  
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+        checkpoint = {'encoder': self.encoder.module.state_dict(),
+                      'autoregressor': self.autoregressor.module.state_dict(),
+                      'predictor': self.predictor.module.state_dict()}
         torch.save(checkpoint, checkpoint_path)
 
-    def train(self, train_data, n_epochs, batch_size, test_data=None, checkpoint_dir=None, save_last=False, save_best=False):
+    def train(self, train_data, n_epochs, batch_size, test_data=None, checkpoint_dir=None,
+              last_checkpoint_path=None, best_checkpoint_path=None):
         train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=self.n_jobs)
 
         if test_data is not None:
@@ -120,16 +127,16 @@ class Trainer:
             torch.cuda.empty_cache()
             self._train_epoch(train_dataloader)
 
-            if save_last:
-                self._save_checkpoint(checkpoint_dir, "last_checkpoint.pt")
+            if last_checkpoint_path is not None:
+                self._save_checkpoint(last_checkpoint_path)
 
             if test_data is not None:
                 torch.cuda.empty_cache()
                 loss = self._test_epoch(test_dataloader)
 
-                if save_best:
+                if best_checkpoint_path is not None:
                     if loss < best_loss:
                         best_loss = loss
-                        self._save_checkpoint(checkpoint_dir, "best_checkpoint.pt")
+                        self._save_checkpoint(best_checkpoint_path)
 
             self.last_epoch += 1
