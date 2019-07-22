@@ -1,6 +1,7 @@
 import random
 import json
 import aicrowd_helpers
+import numpy as np
 import torch
 import utils_pytorch as pyu
 
@@ -10,6 +11,7 @@ from cpc import Encoder, PixelSNAIL, LinearPredictor, ReccurentPredictor, Traine
 
 def set_seed(seed=0):
     random.seed(seed)
+    np.random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
     torch.manual_seed(seed)
@@ -45,15 +47,20 @@ class PCAWrapper(torch.nn.Module):
 
 
 class RepresentationExtractor(torch.nn.Module):
-    def __init__(self, encoder, pca):
+    def __init__(self, encoder, pca, batch_size=64):
         super().__init__()
         self.encoder = encoder
         self.pca = pca
+        self.register_buffer('batch_size', torch.tensor(batch_size))
 
     def forward(self, x):
-        x = self.encoder(x, average=True)
-        x = self.pca(x)
-        return x
+        result = []
+        chunker = (x[pos:pos + self.batch_size.item()] for pos in range(0, len(x), self.batch_size.item()))
+        for chunk in chunker:
+            chunk = self.encoder(chunk, average=True)
+            chunk = self.pca(chunk)
+            result.append(chunk)
+        return torch.cat(result, dim=0)
 
 
 def main():
@@ -92,21 +99,27 @@ def main():
     trainer_config = config['trainer']
     trainer = Trainer(encoder, autoregressor, predictor,
                       optimizer_params=trainer_config['optimizer_params'],
-                      device=trainer_config['device'],
+                      devices=trainer_config['devices'],
                       n_jobs=trainer_config['n_jobs'])
 
     aicrowd_helpers.execution_start()
     aicrowd_helpers.register_progress(0.)
 
-    dataset = pyu.get_dataset(seed=seed, iterator_len=100000)
-    trainer.train(train_data=dataset, n_epochs=trainer_config['n_epochs'], batch_size=trainer_config['batch_size'])
+    train_dataset, test_dataset = pyu.get_datasets(test_part=trainer_config['test_part'])
+    checkpoint_path = trainer_config['checkpoint_path']
+    trainer.train(train_data=train_dataset, test_data=test_dataset, n_epochs=trainer_config['n_epochs'],
+                  batch_size=trainer_config['batch_size'], best_checkpoint_path=checkpoint_path)
+
+    print(f'Encoder weight from {checkpoint_path}')
+    model_state = torch.load(checkpoint_path, map_location=trainer.device)
+    trainer.encoder.module.load_state_dict(model_state['encoder'])
 
     pca_config = config['model']['pca']
     if pca_config['enable']:
         with torch.no_grad():
             pca = PCA(n_components=pca_config['n_components'], whiten=pca_config['whiten'], random_state=seed)
-            pca_data = (dataset[i].unsqueeze(0).to(trainer.device) for i in range(pca_config['n_data']))
-            pca_data = (trainer.encoder(d, average=True) for d in pca_data)
+            pca_data = (train_dataset[i].unsqueeze(0).to(trainer.device) for i in range(pca_config['n_data']))
+            pca_data = (trainer.encoder.module(d, average=True) for d in pca_data)
             pca_data = torch.cat([d.cpu() for d in pca_data], dim=0).numpy()
             pca.fit(pca_data)
             pca = PCAWrapper(pca)
@@ -114,7 +127,7 @@ def main():
         pca = torch.nn.Identity()
 
     aicrowd_helpers.register_progress(0.90)
-    pyu.export_model(RepresentationExtractor(trainer.encoder, pca), input_shape=(1, 3, 64, 64))
+    pyu.export_model(RepresentationExtractor(trainer.encoder.module, pca), input_shape=(1, 3, 64, 64))
     aicrowd_helpers.register_progress(1.0)
 
 

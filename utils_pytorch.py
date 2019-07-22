@@ -176,62 +176,26 @@ def make_representor(model, cuda=None):
 
 
 class DLIBDataset(Dataset):
-    """
-    No-bullshit data-loading from Disentanglement Library, but with a few sharp edges.
-
-    Sharp edge:
-        Unlike a traditional Pytorch dataset, indexing with _any_ index fetches a random batch.
-        What this means is dataset[0] != dataset[0]. Also, you'll need to specify the size
-        of the dataset, which defines the length of one training epoch.
-
-        This is done to ensure compatibility with disentanglement_lib.
-    """
-
-    def __init__(self, name, seed=0, iterator_len=50000):
-        """
-        Parameters
-        ----------
-        name : str
-            Name of the dataset use. You may use `get_dataset_name`.
-        seed : int
-            Random seed.
-        iterator_len : int
-            Length of the dataset. This defines the length of one training epoch.
-        """
-        self.name = name
-        self.seed = seed
-        self.random_state = np.random.RandomState(seed)
-        self.iterator_len = iterator_len
-        self.dataset = self.load_dataset()
-
-    def load_dataset(self):
-        return get_named_ground_truth_data(self.name)
+    def __init__(self, images):
+        self.images = images
 
     def __len__(self):
-        return self.iterator_len
+        return len(self.images)
 
-    def __getitem__(self, item):
-        assert item < self.iterator_len
-        output = self.dataset.sample_observations(1, random_state=self.random_state)[0]
+    def __getitem__(self, idx):
+        output = self.images[idx]
         # Convert output to CHW from HWC
         return torch.from_numpy(np.moveaxis(output, 2, 0)).float()
 
 
-def get_dataset(name=None, seed=0, iterator_len=50000):
-    """
-    Makes a dataset.
-
-    Parameters
-    ----------
-    name : str
-        Name of the dataset use. Defaults to the output of `get_dataset_name`.
-    seed : int
-        Random seed.
-    iterator_len : int
-        Length of the dataset. This defines the length of one training epoch.
-    Returns
-    -------
-    DLIBDataset
-    """
+def get_datasets(name=None, test_part=0.2):
     name = get_dataset_name() if name is None else name
-    return DLIBDataset(name, seed=seed, iterator_len=iterator_len)
+    data = get_named_ground_truth_data(name).images
+
+    idx_perm = np.random.permutation(len(data))
+    n_test_data = int(len(idx_perm) * test_part)
+    test_idxs, train_idxs = idx_perm[:n_test_data], idx_perm[n_test_data:]
+    test_data = [data[idx] for idx in test_idxs]
+    train_data = [data[idx] for idx in train_idxs]
+
+    return DLIBDataset(train_data), DLIBDataset(test_data)

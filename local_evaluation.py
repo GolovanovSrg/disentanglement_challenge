@@ -30,12 +30,6 @@ except ImportError:
     # No pytorch, no problem.
     MONKEY = False
 
-from disentanglement_lib.evaluation.metrics import utils
-from disentanglement_lib.methods.unsupervised import train
-from disentanglement_lib.methods.unsupervised import vae
-from disentanglement_lib.postprocessing import postprocess
-from disentanglement_lib.utils import aggregate_results
-from disentanglement_lib.visualize import visualize_model
 from disentanglement_lib.config.unsupervised_study_v1 import sweep as unsupervised_study_v1
 import tensorflow as tf
 import gin.tf
@@ -143,10 +137,3 @@ for _metric_name in expected_evaluation_metrics:
         raise Exception("Unknown metric name : {}".format(_metric_name))
 
 print("Final Scores : ", final_scores)
-
-
-##############################################################################
-# (Optional) Generate Visualizations
-##############################################################################
-# model_directory = os.path.join(experiment_output_path, "model")
-# visualize_model.visualize(model_directory, "viz_output/")
