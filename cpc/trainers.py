@@ -74,8 +74,10 @@ class Trainer:
             predictions = self.predictor(contexts)
 
             batch_loss = 0
+            embeddings = embeddings.view(*embeddings.shape[:2], -1)
             for n, pred_item in enumerate(predictions, 1):
-                batch_loss += self.criterion(pred_item[:, :, :-n, :], embeddings[:, :, n:, :])
+                pred_item = pred_item.view(*pred_item.shape[:2], -1)
+                batch_loss += self.criterion(pred_item[:, :, :-n], embeddings[:, :, n:])
 
             self.optimizer.zero_grad()
             batch_loss.backward()
@@ -100,8 +102,10 @@ class Trainer:
                 predictions = self.predictor(contexts)
 
                 batch_loss = 0
+                embeddings = embeddings.view(*embeddings.shape[:2], -1)
                 for n, pred_item in enumerate(predictions, 1):
-                    batch_loss += self.criterion(pred_item[:, :, :-n, :], embeddings[:, :, n:, :])
+                    pred_item = pred_item.view(*pred_item.shape[:2], -1)
+                    batch_loss += self.criterion(pred_item[:, :, :-n], embeddings[:, :, n:])
 
                 loss.update(batch_loss.item())
                 tqdm_test_dataloader.set_postfix({'loss': loss()})
