@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,27 +14,31 @@ class MultiheadEmbedding(nn.Module):
 
         self.n_features = n_features
         self.n_heads = n_heads
-        self.proj = nn.Linear(n_features, n_features)
+        self.q_proj = nn.Linear(n_features, n_features, bias=False)
+        self.k_proj = nn.Linear(n_features // n_heads, n_features, bias=False)
+        self.v_proj = nn.Linear(n_features // n_heads, n_features, bias=False)
+        self.embedding = nn.Parameter(torch.normal(mean=torch.zeros(n_embedding, n_features // n_heads), std=0.5))
         self.dropout = nn.Dropout(dropout)
-        self.embedding = nn.Parameter(torch.empty((n_features, n_embedding)))
-
-        self._init_weights()
-
-    def _init_weights(self):
-        nn.init.normal_(self.proj.weight, std=0.02)
-        nn.init.normal_(self.embedding, std=0.02)
 
     def forward(self, x):
         assert x.dim() == 2
-        x = self.proj(x)
-        x = x.view(-1, self.n_heads, self.n_features // self.n_heads).unsqueeze(2)  # b, h, 1, f
-        k = self.embedding.view(self.n_heads, self.n_features // self.n_heads, -1).unsqueeze(0)  # 1, h, f, m
-        w = torch.matmul(x, k) / math.sqrt(self.n_features // self.n_heads)  # b, h, 1, m
-        w = torch.sigmoid(w, dim=-1)
+
+        q = self.q_proj(x).unsqueeze(1)
+        k = self.k_proj(self.embedding).unsqueeze(0).expand(x.shape[0], -1, -1)
+        v = self.v_proj(self.embedding).unsqueeze(0).expand(x.shape[0], -1, -1)
+
+        q = torch.stack(torch.split(q, self.n_features // self.n_heads, dim=2), dim=0)
+        k = torch.stack(torch.split(k, self.n_features // self.n_heads, dim=2), dim=0)
+        v = torch.stack(torch.split(v, self.n_features // self.n_heads, dim=2), dim=0)
+
+        w = torch.matmul(q, k.transpose(2, 3)) 
+        w = w / ((self.n_features // self.n_heads) ** 0.5)
+        w = F.softmax(w, dim=3)
         w = self.dropout(w)
-        v = self.embedding.view(self.n_heads, self.n_features // self.n_heads, -1).unsqueeze(0).permute((0, 1, 3, 2))  # 1, h, m, f
-        out = torch.matmul(w, v)  # b, h, 1, f
-        out = out.view(out.shape[0], -1)
+
+        out = torch.matmul(w, v)
+        out = torch.cat(torch.split(out, 1, dim=0), dim=3)
+        out = out.squeeze(0).squeeze(1)
 
         return out
 
@@ -87,10 +90,16 @@ class Encoder(nn.Module):
 
         if backbone_type == 'resnet18':
             self.backbone = resnet18(pretrained=True)
+            self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]))
+            self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]))
         elif backbone_type == 'resnet34':
             self.backbone = resnet34(pretrained=True)
+            self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]))
+            self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]))
         elif backbone_type == 'seresnext50':
             self.backbone = se_resnext50_32x4d(pretrained='imagenet')
+            self.mean = self.backbone.mean
+            self.std = self.backbone.std
 
         if hasattr(self.backbone, "avgpool"):
             self.backbone.avgpool = nn.AdaptiveAvgPool2d(1)
@@ -112,28 +121,17 @@ class Encoder(nn.Module):
         self.kernel_size = kernel_size
         self.stride = kernel_size // 2 if stride is None else stride
 
-        mapping = []
-        for i in range(8):
-            mapping.append(nn.ReLU(inplace=True))
-            mapping.append(nn.Conv2d(embedding_size, embedding_size, kernel_size=1, groups=1, bias=True))
-
-        self.mapping = nn.Sequential(*mapping)
-        self.basis = BasisEmbedding(embedding_size, embedding_size)
-
     def forward(self, x, average=False):
         x = x.permute((0, 2, 3, 1))
+        x = (x - self.mean) / self.std
         x = x.unfold(1, self.kernel_size, self.stride).unfold(2, self.kernel_size, self.stride)
         crops = x.contiguous()
         b, r, c, f, h, w = crops.shape
         crops = crops.view(-1, f, h, w)
         
         embeddings = self.backbone(crops)
-        embeddings = F.relu(embeddings)
-        embeddings = self.basis(embeddings)
         embeddings = embeddings.view(b, r, c, -1)
         embeddings = embeddings.permute((0, 3, 1, 2))
-
-        #embeddings = self.mapping(embeddings)
 
         if average:
             embeddings = embeddings.mean(dim=(2, 3))
@@ -147,7 +145,7 @@ class LinearPredictor(nn.Module):
         self.convs = nn.ModuleList([nn.Conv2d(in_channels, out_channels, 1, bias=False) for _ in range(n_predictions)])
 
     def forward(self, contexts):
-        predictions = [F.relu(conv(contexts)) for conv in self.convs]
+        predictions = [conv(contexts) for conv in self.convs]
         return predictions
 
 class ReccurentPredictor(nn.Module):
@@ -165,6 +163,6 @@ class ReccurentPredictor(nn.Module):
         for _ in range(self.n_predictions):
             outputs, hiden_state = self.rnn(contexts, hiden_state)
             outputs = outputs.view(b, h, w, -1).permute((0, 3, 1, 2)).contiguous()
-            predictions.append(F.relu(outputs))
+            predictions.append(outputs)
 
         return predictions
