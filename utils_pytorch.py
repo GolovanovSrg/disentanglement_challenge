@@ -4,7 +4,7 @@ from collections import namedtuple
 
 import numpy as np
 import torch
-from torch.jit import trace
+from albumentations import Compose, HorizontalFlip, VerticalFlip, RandomRotate90, RandomSizedCrop
 
 # ------ Data Loading ------
 from torch.utils.data.dataset import Dataset
@@ -79,81 +79,47 @@ def get_model_path(base_path=None, experiment_name=None, make=True):
     return model_path
 
 
-def export_model(model, path=None, input_shape=(1, 3, 64, 64)):
-    """
-    Exports the model. If the model is a `ScriptModule`, it is saved as is. If not,
-    it is traced (with the given input_shape) and the resulting ScriptModule is saved
-    (this requires the `input_shape`, which defaults to the competition default).
-
-    Parameters
-    ----------
-    model : torch.nn.Module or torch.jit.ScriptModule
-        Pytorch Module or a ScriptModule.
-    path : str
-        Path to the file where the model is saved. Defaults to the value set by the
-        `get_model_path` function above.
-    input_shape : tuple or list
-        Shape of the input to trace the module with. This is only required if model is not a
-        torch.jit.ScriptModule.
-
-    Returns
-    -------
-    str
-        Path to where the model is saved.
-    """
+def export_model(model_state, path=None):
     path = get_model_path() if path is None else path
-    model = deepcopy(model).cpu().eval()
-    if not isinstance(model, torch.jit.ScriptModule):
-        assert input_shape is not None, "`input_shape` must be provided since model is not a " \
-                                        "`ScriptModule`."
-        traced_model = trace(model, torch.zeros(*input_shape))
-    else:
-        traced_model = model
-    torch.jit.save(traced_model, path)
-    return path
+    torch.save(model_state, path)
 
 
 def import_model(path=None):
-    """
-    Imports a model (as ScriptModule) from file.
+    from cpc.models import Encoder, RepresentationExtractor
+    from cpc.pixelsnail import PixelSNAIL
 
-    Parameters
-    ----------
-    path : str
-        Path to where the model is saved. Defaults to the return value of the `get_model_path`
-        function above.
-
-    Returns
-    -------
-    torch.jit.ScriptModule
-        The model file.
-    """
     path = get_model_path() if path is None else path
-    return torch.jit.load(path)
+    model_state = torch.load(path, map_location='cpu')
+
+    config = model_state['config']
+
+    encoder_config = config['encoder']
+    encoder = Encoder(embedding_size=encoder_config['embedding_size'],
+                      kernel_size=encoder_config['kernel_size'],
+                      backbone_type=encoder_config['backbone_type'])
+    encoder.load_state_dict(model_state['encoder'])
+
+    autoregressor_config = config['autoregressor']
+    autoregressor = PixelSNAIL(in_channel=encoder_config['embedding_size'],
+                               channel=autoregressor_config['channel'],
+                               kernel_size=autoregressor_config['kernel_size'],
+                               n_block=autoregressor_config['n_block'],
+                               n_res_block=autoregressor_config['n_res_block'],
+                               res_channel=autoregressor_config['res_channel'],
+                               attention=autoregressor_config['attention'],
+                               n_head=autoregressor_config['n_head'],
+                               dropout=autoregressor_config['dropout'])
+    autoregressor.load_state_dict(model_state['autoregressor'])
+
+    representator = RepresentationExtractor(encoder, autoregressor, batch_size=64)
+
+    return representator
 
 
 def make_representor(model, cuda=None):
-    """
-    Encloses the pytorch ScriptModule in a callable that can be used by `disentanglement_lib`.
-
-    Parameters
-    ----------
-    model : torch.nn.Module or torch.jit.ScriptModule
-        The Pytorch model.
-    cuda : bool
-        Whether to use CUDA for inference. Defaults to the return value of the `use_cuda`
-        function defined above.
-
-    Returns
-    -------
-    callable
-        A callable function (`representation_function` in dlib code)
-    """
-    # Deepcopy doesn't work on ScriptModule objects yet:
-    # https://github.com/pytorch/pytorch/issues/18106
-    # model = deepcopy(model)
     cuda = use_cuda() if cuda is None else cuda
     model = model.cuda() if cuda else model.cpu()
+    model.eval()
 
     # Define the representation function
     def _represent(x):
@@ -175,17 +141,34 @@ def make_representor(model, cuda=None):
     return _represent
 
 
+class TrainTransform:
+    def __init__(self):
+        self.transforms = Compose([HorizontalFlip(),
+                                   VerticalFlip(),
+                                   RandomRotate90(),
+                                   RandomSizedCrop(min_max_height=(56, 64),
+                                                   height=64, width=64)])
+
+    def __call__(self, image):
+        return self.transforms(image=image)['image']
+
+
 class DLIBDataset(Dataset):
-    def __init__(self, images):
+    def __init__(self, images, transform=None):
         self.images = images
+        self.transform = transform
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        output = self.images[idx]
+        output = self.images[idx].astype(np.float32)
+        if self.transform is not None:
+            output = self.transform(output)
+
         # Convert output to CHW from HWC
-        return torch.from_numpy(np.moveaxis(output, 2, 0)).float()
+        output = np.moveaxis(output, 2, 0)
+        return torch.from_numpy(output)
 
 
 def get_datasets(name=None, test_part=0.2):
@@ -197,5 +180,6 @@ def get_datasets(name=None, test_part=0.2):
     test_idxs, train_idxs = idx_perm[:n_test_data], idx_perm[n_test_data:]
     test_data = [data[idx] for idx in test_idxs]
     train_data = [data[idx] for idx in train_idxs]
+    train_transform = TrainTransform()
 
-    return DLIBDataset(train_data), DLIBDataset(test_data)
+    return DLIBDataset(train_data, transform=train_transform), DLIBDataset(test_data)

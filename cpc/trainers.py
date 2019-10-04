@@ -36,6 +36,7 @@ class Trainer:
         weight_decay = optimizer_params.get('weight_decay', 0)
         warmap = optimizer_params.get('warmap', 100)
         amsgrad = optimizer_params.get('amsgrad', False)
+        self.clip_grad = optimizer_params.get('clip_grad', None)
 
         self.device = torch.device('cuda:' + str(devices[0]))
         self.encoder = nn.DataParallel(encoder, device_ids=devices).to(self.device)
@@ -60,6 +61,7 @@ class Trainer:
         self.last_epoch = 0
         self.n_jobs = n_jobs
 
+
     def _train_epoch(self, train_dataloader):
         tqdm_train_dataloader = tqdm(train_dataloader, desc=f'Train, epoch #{self.last_epoch}')
         self.encoder.train()
@@ -75,12 +77,18 @@ class Trainer:
 
             batch_loss = 0
             embeddings = embeddings.view(*embeddings.shape[:2], -1)
-            for n, pred_item in enumerate(predictions, 1):
-                pred_item = pred_item.view(*pred_item.shape[:2], -1)
-                batch_loss += self.criterion(pred_item[:, :, :-n], embeddings[:, :, n:])
+            for k in range(1, embeddings.shape[1] + 1):
+                for n, pred_item in enumerate(predictions, 1):
+                    pred_item = pred_item.view(*pred_item.shape[:2], -1)
+                    batch_loss += self.criterion(pred_item[:, :k, :-n], embeddings[:, :k, n:]) / embeddings.shape[1]
 
             self.optimizer.zero_grad()
             batch_loss.backward()
+
+            if self.clip_grad is not None:
+                for group in self.optimizer.param_groups:
+                    nn.utils.clip_grad_norm_(group['params'], self.clip_grad)
+
             self.scheduler.step()
             self.optimizer.step()
 
@@ -103,9 +111,10 @@ class Trainer:
 
                 batch_loss = 0
                 embeddings = embeddings.view(*embeddings.shape[:2], -1)
-                for n, pred_item in enumerate(predictions, 1):
-                    pred_item = pred_item.view(*pred_item.shape[:2], -1)
-                    batch_loss += self.criterion(pred_item[:, :, :-n], embeddings[:, :, n:])
+                for k in range(1, embeddings.shape[1] + 1):
+                    for n, pred_item in enumerate(predictions, 1):
+                        pred_item = pred_item.view(*pred_item.shape[:2], -1)
+                        batch_loss += self.criterion(pred_item[:, :k, :-n], embeddings[:, :k, n:]) / embeddings.shape[1]
 
                 loss.update(batch_loss.item())
                 tqdm_test_dataloader.set_postfix({'loss': loss()})

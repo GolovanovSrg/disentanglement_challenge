@@ -215,7 +215,7 @@ class PixelSNAIL(nn.Module):
         return positions
 
     def __init__(self, in_channel, channel, kernel_size, n_block, n_res_block, res_channel, attention=True,
-                 n_head=8, activation=nn.ELU(inplace=True), dropout=0.1, condition_dim=0):
+                 n_head=8, activation=nn.ReLU(inplace=True), dropout=0.1, condition_dim=0):
         super().__init__()
 
         kernel = kernel_size + 1 if kernel_size % 2 == 0 else kernel_size
@@ -228,7 +228,7 @@ class PixelSNAIL(nn.Module):
                                n_head=n_head, activation=activation, dropout=dropout, condition_dim=condition_dim)
         self.blocks.append(block)
 
-        self.out = nn.Sequential(activation, WNConv2d(channel, in_channel, 1))
+        self.out = nn.Sequential(activation, nn.Conv2d(channel, in_channel, 1))
         self.background = None
 
     def forward(self, input, condition=None):

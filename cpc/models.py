@@ -82,24 +82,25 @@ def remove_batchnorm2d(module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, embedding_size, kernel_size, stride=None, backbone_type='resnet34'):
+    def __init__(self, embedding_size, kernel_size, stride=None, pretrained=False, backbone_type='resnet34'):
         super().__init__()
 
         if backbone_type not in ['resnet18', 'resnet34', 'seresnext50']:
             raise ValueError(f'Wrong backbone type: expected one of ["resnet34", "seresnext50"], got {backbone_type}')
 
         if backbone_type == 'resnet18':
-            self.backbone = resnet18(pretrained=True)
-            self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]))
-            self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]))
+            self.backbone = resnet18(pretrained=pretrained)
         elif backbone_type == 'resnet34':
-            self.backbone = resnet34(pretrained=True)
-            self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]))
-            self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]))
+            self.backbone = resnet34(pretrained=pretrained)
         elif backbone_type == 'seresnext50':
-            self.backbone = se_resnext50_32x4d(pretrained='imagenet')
-            self.mean = self.backbone.mean
-            self.std = self.backbone.std
+            self.backbone = se_resnext50_32x4d(pretrained=('imagenet' if pretrained else None))
+
+        self.backbone = remove_batchnorm2d(self.backbone)
+
+        mean = [0.485, 0.456, 0.406] if pretrained else [0.5, 0.5, 0.5]
+        std = [0.229, 0.224, 0.225] if pretrained else [0.5, 0.5, 0.5]
+        self.register_buffer('mean', torch.tensor(mean))
+        self.register_buffer('std', torch.tensor(std))
 
         if hasattr(self.backbone, "avgpool"):
             self.backbone.avgpool = nn.AdaptiveAvgPool2d(1)
@@ -114,10 +115,9 @@ class Encoder(nn.Module):
         if hasattr(self.backbone, "fc"):
             self.backbone.fc = nn.Linear(self.backbone.fc.in_features, embedding_size)
         elif hasattr(self.backbone, "last_linear"):
-            self.backbone.last_linear = nn.Linear(self.backbone.last_linear.in_features, embedding_size)
+            self.backbone.last_linear = nn.Sequential(nn.Linear(self.backbone.last_linear.in_features, embedding_size))
 
-        self.backbone = remove_batchnorm2d(self.backbone)
-
+        self.embedding_size = embedding_size
         self.kernel_size = kernel_size
         self.stride = kernel_size // 2 if stride is None else stride
 
@@ -140,9 +140,12 @@ class Encoder(nn.Module):
 
 
 class LinearPredictor(nn.Module):
-    def __init__(self, in_channels, out_channels, n_predictions=1):
+    def __init__(self, in_channels, out_channels, activation=nn.ReLU(inplace=True), n_predictions=1):
         super().__init__()
-        self.convs = nn.ModuleList([nn.Conv2d(in_channels, out_channels, 1, bias=False) for _ in range(n_predictions)])
+        self.convs = nn.ModuleList([nn.Sequential(nn.Conv2d(in_channels, out_channels, 1),
+                                                  activation,
+                                                  nn.Conv2d(out_channels, out_channels, 1))
+                                    for _ in range(n_predictions)])
 
     def forward(self, contexts):
         predictions = [conv(contexts) for conv in self.convs]
@@ -166,3 +169,22 @@ class ReccurentPredictor(nn.Module):
             predictions.append(outputs)
 
         return predictions
+
+
+class RepresentationExtractor(nn.Module):
+    def __init__(self, encoder, autoregressor, batch_size=64):
+        super().__init__()
+        self.encoder = encoder
+        self.autoregressor = autoregressor
+        self.batch_size = batch_size
+
+    def forward(self, x):
+        result = []
+        chunker = (x[pos:pos + self.batch_size] for pos in range(0, len(x), self.batch_size))
+        for chunk in chunker:
+            chunk = self.encoder(chunk, average=True)
+            #chunk = self.autoregressor(chunk)
+            #chunk = chunk[:, :, -1, -1]
+            result.append(chunk)
+            
+        return torch.cat(result, dim=0)
